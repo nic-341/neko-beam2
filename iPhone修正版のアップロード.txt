@@ -11,5 +11,5 @@ assetsフォルダーも同じ階層に置いてください。
 ・CSSとJavaScriptの読み込みURLを更新し、旧キャッシュの利用を避けました。
 
 GitHub Pagesの公開処理が完了してから、iPhoneのSafariでゲームを開き直してください。
-古い画面のままなら、ゲームURLの末尾に ?v=warm-home-1 を付けて開いてください。
+古い画面のままなら、ゲームURLの末尾に ?v=smooth-run-1 を付けて開いてください。
 実機iPhoneでの検証は未実施です。

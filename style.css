@@ -20,3 +20,6 @@
 
 #overlay.paused #hint{display:none}
 
+
+#hud .life-label{font-size:10px;letter-spacing:1px}#hud .stock-label{font-size:13px;color:#17334e}#hud #stock{font-size:18px;margin-left:5px}
+

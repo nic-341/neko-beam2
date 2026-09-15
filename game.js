@@ -1,9 +1,10 @@
 'use strict';
 // Replace these PNGs to customize the artwork. Missing images use pixel-art fallbacks.
-const SPRITES={cat:'assets/cat.png',catAnimation:'assets/cat-animation.png',mouseAnimation:'assets/mouse-animation.png',settle:'assets/cat-settle.png',sleep:'assets/cat-sleep.png',mouse:'assets/mouse.png',taiyaki:'assets/taiyaki.png',tower:'assets/tower-warm.png',background:'assets/hills-background.png'};
+const SPRITES={cat:'assets/cat.png',catAnimation:'assets/cat-animation.png',run:'assets/cat-run.png',mouseAnimation:'assets/mouse-animation.png',settle:'assets/cat-settle.png',sleep:'assets/cat-sleep.png',mouse:'assets/mouse.png',taiyaki:'assets/taiyaki-simple.png',tower:'assets/tower-warm.png',background:'assets/hills-background.png'};
 const art={};for(const [k,src] of Object.entries(SPRITES)){const im=new Image();let retried=false;im.onload=()=>art[k]=im;im.onerror=()=>{const embedded=window.NEKO_EMBEDDED_ASSETS?.[k];if(!retried&&embedded){retried=true;im.src=embedded;}};im.src=src;}
 const canvas=document.querySelector('#canvas'),ctx=canvas.getContext('2d');
 const ui={overlay:document.querySelector('#overlay'),title:document.querySelector('h1'),msg:document.querySelector('#message'),start:document.querySelector('#start'),life:document.querySelector('#life'),fish:document.querySelector('#fish'),bar:document.querySelector('#progress i')};
+const GOAL_OFFSET=7; // Compensate for transparent pixels below the tower feet.
 const WORLD=12000,GROUND=440,SECTION=1200,SECTION_COUNT=10,keys={left:false,right:false,jump:false,beam:false},dash={left:false,right:false},lastTap={left:-1000,right:-1000};
 // Ground spans and raised ledges are local to each section. The first 300px
 // remain safe for respawning; every required jump fits ordinary walking speed.
@@ -16,29 +17,49 @@ const COURSE_PATTERNS=[
 ];
 const COURSE_ORDER=[0,1,2,3,4,2,1,3,0,4];
 let state='ready',player,camera=0,platforms=[],mice=[],fish=[],shots=[],particles=[],collected=0,elapsed=0,checkpoint=80,last=0,acc=0,jumpQueued=false,sound=false,audio;
-let endingTime=0,arrivalX=0,arrivalY=0;
+let endingTime=0,arrivalX=0,arrivalY=0,stock=3,restartTime=0;
 function tone(f,d=.08){if(!sound)return;try{audio??=new(window.AudioContext||window.webkitAudioContext)();audio.resume();const o=audio.createOscillator(),g=audio.createGain();o.type='square';o.frequency.value=f;g.gain.setValueAtTime(.035,audio.currentTime);g.gain.exponentialRampToValueAtTime(.001,audio.currentTime+d);o.connect(g);g.connect(audio.destination);o.start();o.stop(audio.currentTime+d);}catch{}}
-function reset(){endingTime=0;ui.overlay.classList.remove('ending');player={x:80,y:GROUND-38,w:38,h:38,vx:0,vy:0,dir:1,hp:3,inv:0,grounded:false,coyote:0,cool:0};camera=0;collected=0;elapsed=0;checkpoint=80;shots=[];particles=[];platforms=[];mice=[];fish=[];
- for(let s=0;s<SECTION_COUNT;s++){
-  const x=s*SECTION,basePattern=COURSE_PATTERNS[COURSE_ORDER[s]],pattern=s===SECTION_COUNT-1?{...basePattern,ledges:basePattern.ledges.filter(([offset])=>offset<900)}:basePattern;
-  for(const [offset,width] of pattern.ground)platforms.push({x:x+offset,y:GROUND,w:width,h:180});
-  for(const [offset,height,width] of pattern.ledges)platforms.push({x:x+offset,y:GROUND-height,w:width,h:height<=75?height:20});
-  for(const offset of [260,435,605,775,1070]){const surfaces=platforms.filter(p=>p.x<=x+offset&&p.x+p.w>x+offset);const top=surfaces.length?Math.min(...surfaces.map(p=>p.y)):GROUND;fish.push({x:x+offset,y:top-34,taken:false});}
-  if(s>0)mice.push({x:x+220,y:GROUND-25,w:34,h:25,v:36+(s%3)*8,min:x+100,max:x+310,alive:true});
-  if(s===0)mice.push({x:x+560,y:GROUND-25,w:34,h:25,v:-42,min:x+525,max:x+850,alive:true});
-  else {const ledge=pattern.ledges[pattern.ledges.length-1];mice.push({x:x+ledge[0]+30,y:GROUND-ledge[1]-25,w:34,h:25,v:s%2?34:-34,min:x+ledge[0]+5,max:x+ledge[0]+ledge[2]-39,alive:true});}
+function reset(newGame=true){if(newGame)stock=3;restartTime=0;endingTime=0;ui.overlay.classList.remove('ending');player={x:80,y:GROUND-38,w:38,h:38,vx:0,vy:0,dir:1,hp:3,inv:0,grounded:false,coyote:0,cool:0};camera=0;collected=0;elapsed=0;checkpoint=80;shots=[];particles=[];platforms=[];mice=[];fish=[];
+ // Eight deliberate learning jumps; long quiet stretches between challenges.
+ const gaps=[[2300,2390],[5500,5590],[10300,10400]];
+ let edge=0;for(const [left,right] of gaps){platforms.push({x:edge,y:GROUND,w:left-edge,h:180});edge=right;}platforms.push({x:edge,y:GROUND,w:WORLD-edge,h:180});
+ const ledges=[[1000,40,100],[3600,50,220],[3920,85,240],[7100,55,120],[8700,45,180]];
+ for(const [x,height,width] of ledges)platforms.push({x,y:GROUND-height,w:width,h:height});
+ // Patrol only on clear stretches of the starting ground, never on ledges.
+ const blocked=[...gaps,...ledges.map(([x,h,w])=>[x,x+w])].sort((a,b)=>a[0]-b[0]);
+ const safe=[];edge=350;for(const [left,right] of blocked){if(left-edge>=200)safe.push([edge,left]);edge=Math.max(edge,right);}safe.push([edge,WORLD-350]);
+ for(let s=0;s<SECTION_COUNT;s++)for(const offset of [450,900]){
+  const desired=s*SECTION+offset;
+  const span=safe.reduce((best,p)=>{const distance=q=>Math.abs(desired-Math.max(q[0]+20,Math.min(q[1]-54,desired)));return distance(p)<distance(best)?p:best;},safe[0]);
+  const x=Math.max(span[0]+20,Math.min(span[1]-54,desired));
+  mice.push({x,y:GROUND-25,w:34,h:25,v:s%2?42:-42,min:Math.max(span[0]+8,x-55),max:Math.min(span[1]-42,x+55),alive:true});
  }
- // A clear landing and runway in front of the goal tower.
- platforms.push({x:WORLD-300,y:GROUND,w:300,h:180});clearKeys();updateHUD();}
+ for(let s=0;s<SECTION_COUNT;s++)for(const offset of [260,435,605,775,1070]){
+  const x=s*SECTION+offset,surfaces=platforms.filter(p=>p.x<=x&&p.x+p.w>x);
+  fish.push({x,y:(surfaces.length?Math.min(...surfaces.map(p=>p.y)):GROUND)-34,taken:false});
+ }
+ // Optional rear walls: pass through their sides and underside, land only on top.
+ for(const x of [1600,6200,9400])platforms.push({x,y:GROUND-65,w:260,h:65,oneWay:true});
+ clearKeys();updateHUD();}
 function clearKeys(){for(const k in keys)keys[k]=false;dash.left=dash.right=false;jumpQueued=false;document.querySelectorAll('.active').forEach(e=>e.classList.remove('active'));}
-function updateHUD(){ui.life.textContent='♥ '.repeat(player.hp)+'♡ '.repeat(3-player.hp);ui.fish.textContent=String(collected).padStart(2,'0');ui.bar.style.width=Math.min(100,player.x/(WORLD-200)*100)+'%';}
+function updateHUD(){ui.life.textContent='♥ '.repeat(player.hp)+'♡ '.repeat(3-player.hp);document.querySelector('#stock').textContent=String(stock);ui.fish.textContent=String(collected).padStart(2,'0');ui.bar.style.width=Math.min(100,player.x/(WORLD-200)*100)+'%';}
 function show(title,msg,label){ui.overlay.classList[state==='paused'?'add':'remove']('paused');ui.title.innerHTML=title;ui.msg.textContent=msg;ui.start.innerHTML=label+' <span>→</span>';ui.overlay.style.display='flex';}
-function start(){if(state==='paused'){state='playing';ui.overlay.style.display='none';return;}reset();state='playing';ui.overlay.style.display='none';tone(660);}
+function start(){if(state==='restarting'){reset(false);state='playing';ui.overlay.style.display='none';return;}if(state==='paused'){state='playing';ui.overlay.style.display='none';return;}reset();state='playing';ui.overlay.style.display='none';tone(660);}
 function pause(){if(state==='playing'){state='paused';clearKeys();show('ひとやすみ。','猫もあなたも、ちょっと休憩。','冒険をつづける');}else if(state==='paused')start();}
-function hit(fall=false){if(!fall&&player.inv>0)return;player.hp--;tone(130,.2);burst(player.x+18,player.y+15,'#f3978c',12);if(player.hp<=0){state='over';clearKeys();show('また、<br><em>歩き出そう。</em>','ライフがなくなりました。たい焼き '+collected+' 個を集めました。','もういちど遊ぶ');}else{player.inv=2;player.vy=-210;if(fall){player.x=checkpoint;player.y=GROUND-100;player.vy=0;shots=[];}}updateHUD();}
+function hit(fall=false){
+ if(state!=='playing'||(!fall&&player.inv>0))return;
+ player.hp--;tone(130,.2);burst(player.x+18,player.y+15,'#f3978c',12);
+ if(player.hp<=0){
+  stock--;clearKeys();
+  if(stock===0){state='over';show('GAME OVER','残機がなくなりました。たい焼き '+collected+' 個を集めました。','もういちど遊ぶ');}
+  else{state='restarting';restartTime=1.2;show('もういちど！','残機 '+stock+' · ライフ3で1-1の最初から再スタートします。','すぐに再スタート');}
+ }else{player.inv=2;player.vy=-210;if(fall){player.x=checkpoint;player.y=GROUND-100;player.vy=0;shots=[];}}
+ updateHUD();
+}
 function rect(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y;}
 function burst(x,y,color,n){for(let i=0;i<n;i++)particles.push({x,y,vx:Math.cos(i*2.4)*70,vy:Math.sin(i*2.4)*90-40,t:.5,color});}
 function step(dt){
+ if(state==='restarting'){if(document.hidden)return;restartTime-=dt;if(restartTime<=0){reset(false);state='playing';ui.overlay.style.display='none';}return;}
  if(state==='arriving'||state==='clear'){
   if(document.hidden)return;
   endingTime+=dt;
@@ -46,7 +67,7 @@ function step(dt){
    const t=Math.min(1,endingTime/1.3),ease=t*t*(3-2*t);
    player.x=arrivalX+(WORLD-178-arrivalX)*ease;
    const stepUp=Math.max(0,Math.min(1,(t-.35)/.65));
-   player.y=arrivalY+(GROUND-61-arrivalY)*stepUp;player.dir=1;player.grounded=true;player.vx=endingTime<1.3?55:0;
+   player.y=arrivalY+(GROUND-61+GOAL_OFFSET-arrivalY)*stepUp;player.dir=1;player.grounded=true;player.vx=endingTime<1.3?55:0;
    camera=Math.max(0,Math.min(WORLD-viewW(),player.x-viewW()*.33));
    if(endingTime>=5.4){state='clear';ui.overlay.classList.add('ending');show('おやすみ、<br><em>小さな冒険家。</em>','ステージクリア！ たい焼き '+collected+' / '+fish.length+' 個 · '+Math.floor(elapsed/60)+'分'+Math.floor(elapsed%60)+'秒','もういちど遊ぶ');}
   }return;
@@ -55,8 +76,8 @@ function step(dt){
  const direction=Number(keys.right)-Number(keys.left);const running=direction>0?dash.right:dash.left;player.vx=direction*(running?265:190);if(direction)player.dir=direction;
  if(jumpQueued&&player.coyote>0){player.vy=-465;player.grounded=false;player.coyote=0;tone(430);}jumpQueued=false;
  player.vy=Math.min(700,player.vy+1250*dt);player.x=Math.max(0,Math.min(WORLD-40,player.x+player.vx*dt));
- for(const p of platforms)if(rect(player,p)){if(player.vx>0)player.x=p.x-player.w;else if(player.vx<0)player.x=p.x+p.w;}
- const oldY=player.y;player.y+=player.vy*dt;player.grounded=false;for(const p of platforms)if(rect(player,p)){if(player.vy>=0&&oldY+player.h<=p.y+1){player.y=p.y-player.h;player.vy=0;player.grounded=true;}else if(player.vy<0&&oldY>=p.y+p.h-1){player.y=p.y+p.h;player.vy=0;}}
+ for(const p of platforms)if(!p.oneWay&&rect(player,p)){if(player.vx>0)player.x=p.x-player.w;else if(player.vx<0)player.x=p.x+p.w;}
+ const oldY=player.y;player.y+=player.vy*dt;player.grounded=false;for(const p of platforms)if(rect(player,p)){if(player.vy>=0&&oldY+player.h<=p.y+1){player.y=p.y-player.h;player.vy=0;player.grounded=true;}else if(!p.oneWay&&player.vy<0&&oldY>=p.y+p.h-1){player.y=p.y+p.h;player.vy=0;}}
  if(player.grounded&&player.x%SECTION<300)checkpoint=Math.floor(player.x/SECTION)*SECTION+80;
  if(player.y>700){hit(true);if(state!=='playing')return;}
  if(keys.beam&&player.cool<=0){shots.push({x:player.x+(player.dir===1?32:-22),y:player.y+12,w:28,h:5,v:player.dir*650,t:1.1});player.cool=.24;tone(880,.04);}
@@ -72,7 +93,7 @@ function sprite(name,x,y,w,h,flip=false){if(!art[name])return false;ctx.save();c
 function viewW(){return canvas.width/canvas.height*540;}
 function catFrame(){
  if(!player.grounded)return player.vy<0?6:7;
- if(Math.abs(player.vx)>220)return 4+Math.floor(elapsed*13)%2;
+ if(Math.abs(player.vx)>220)return 4+Math.floor(elapsed*9)%2;
  if(Math.abs(player.vx)>0)return Math.floor((elapsed+endingTime)*9)%4;
  return 1;
 }
@@ -81,7 +102,14 @@ function animatedCat(){
  ctx.save();
  // A crisp dark outline and pale rim separate the cat from foliage.
  ctx.shadowColor='#102139';ctx.shadowBlur=3;ctx.shadowOffsetY=1;
- if(sheet){
+ if(art.run&&player.grounded&&Math.abs(player.vx)>220){
+  const runSheet=art.run,frame=Math.floor(elapsed*9)%4,cw=runSheet.width/4;
+  // Match the walking sheet scale: each walk frame is square; the run sheet has taller transparent margins.
+  const drawHeight=64*runSheet.height/cw;
+  ctx.translate(Math.round(player.x+19),Math.round(player.y+38-drawHeight*.71));
+  if(player.dir<0)ctx.scale(-1,1);
+  ctx.drawImage(runSheet,frame*cw,0,cw,runSheet.height,-40,0,80,drawHeight);
+ }else if(sheet){
   const cw=sheet.width/4,ch=sheet.height/2,baseline=[.90,.90,.90,.90,.77,.82,.85,.85][frame];
   const bob=player.grounded&&player.vx?Math.sin(elapsed*(Math.abs(player.vx)>220?26:18))*.7:0;
   ctx.translate(Math.round(player.x+19),Math.round(player.y+38-64*baseline+bob));
@@ -168,19 +196,21 @@ function draw(){const w=viewW();ctx.setTransform(canvas.width/w,0,0,canvas.heigh
  ctx.fillStyle='rgba(225,237,245,.32)';ctx.fillRect(0,0,w,540);
  ctx.fillStyle='#268ddb';ctx.fillRect(0,501,w,39);for(let i=0;i<60;i++){ctx.fillStyle=i%2?'#d2f5ff':'#6bc9ff';ctx.fillRect(((i*57-elapsed*20-camera*.3)%(w+70)+w+70)%(w+70)-35,506+i%6*6,10+i%4*5,2);}
  ctx.save();ctx.translate(-Math.round(camera),0);
- for(const p of platforms){if(p.x+p.w<camera||p.x>camera+w)continue;terrain(p);details(p);}
+ // Rear walls use the same stone and grass, softened to read behind the action.
+ for(const p of platforms.filter(p=>p.oneWay)){if(p.x+p.w<camera||p.x>camera+w)continue;ctx.save();terrain(p);details(p);ctx.fillStyle='rgba(173,198,210,.24)';ctx.fillRect(p.x,p.y+5,p.w,p.h-5);ctx.restore();}
+ for(const p of platforms){if(p.oneWay||p.x+p.w<camera||p.x>camera+w)continue;terrain(p);details(p);}
  const signX=WORLD/2-41;if(signX>camera-90&&signX<camera+w)sign(signX,GROUND-92,'中間地点','あと半分！ →');
  for(let i=0;i<SECTION_COUNT;i++){const x=i*SECTION+155;if(x>camera-50&&x<camera+w){shrub(x,GROUND);flower(x+80,GROUND);}}
  for(const f of fish)if(!f.taken&&f.x>camera-30&&f.x<camera+w+30){const y=f.y+Math.sin(elapsed*3+f.x)*3;if(!sprite('taiyaki',f.x-18,y-12,36,24))pixel(fishPixels,f.x-14,y-8,2,{a:'#ab6d40',o:'#f4bb66',k:'#493e38'});}
  for(const m of mice)if(m.alive&&m.x>camera-40&&m.x<camera+w+40){ctx.save();ctx.fillStyle='#15293e80';ctx.fillRect(m.x+2,m.y+m.h-2,30,4);ctx.shadowColor='#fff0d2';ctx.shadowBlur=3;if(!animatedMouse(m)&&!sprite('mouse',m.x,m.y,m.w,m.h,m.v<0))pixel(mousePixels,m.x-2,m.y+2,2.5,{g:'#595365',p:'#efa5ac',k:'#172537',n:'#f4bbb0'},m.v<0);ctx.restore();}
- const tx=WORLD-200;if(!sprite('tower',tx-22,GROUND-180,160,180))cuteTower(tx,GROUND-145);
+ const tx=WORLD-200;if(!sprite('tower',tx-22,GROUND-180+GOAL_OFFSET,160,180))cuteTower(tx,GROUND-145);
  for(const b of shots){ctx.fillStyle='#a5fff0';ctx.fillRect(b.x,b.y,b.w,b.h);ctx.fillStyle='#fffbe5';ctx.fillRect(b.x,b.y+1,b.w,2);}
  const ending=state==='arriving'||state==='clear';
  if(player.grounded&&!ending){ctx.fillStyle='#132c4770';ctx.fillRect(player.x-6,player.y+36,50,4);}
  if(ending){
   const blend=Math.max(0,Math.min(1,(endingTime-1.3)/.18));
   if(blend<1){ctx.save();ctx.globalAlpha=1-blend;animatedCat();ctx.restore();}
-  sleepingCat(tx);
+  ctx.save();ctx.translate(0,GOAL_OFFSET);sleepingCat(tx);ctx.restore();
  }else if(player.inv<=0||Math.floor(player.inv*12)%2===0)animatedCat();
  for(const p of particles){ctx.globalAlpha=p.t*2;ctx.fillStyle=p.color;ctx.fillRect(p.x,p.y,4,4);}ctx.globalAlpha=1;ctx.restore();}
 function resize(){const r=canvas.getBoundingClientRect();const width=Math.round(r.width/r.height*540);if(canvas.width!==width)canvas.width=width;canvas.height=540;draw();}window.addEventListener('resize',resize);
@@ -209,3 +239,4 @@ for(const eventName of ['gesturestart','gesturechange','gestureend'])gameSurface
 document.addEventListener('contextmenu',e=>e.preventDefault());document.addEventListener('dragstart',e=>e.preventDefault());document.addEventListener('gesturestart',e=>e.preventDefault(),{passive:false});window.addEventListener('blur',()=>{clearKeys();if(state==='playing')pause();});document.addEventListener('visibilitychange',()=>{if(document.hidden){clearKeys();if(state==='playing')pause();}});
 ui.start.onclick=start;document.querySelector('#pause').onclick=pause;document.querySelector('#sound').onclick=()=>{sound=!sound;document.querySelector('#sound').textContent='音 '+(sound?'ON':'OFF');tone(660);};
 function frame(t){if(!last)last=t;acc+=Math.min((t-last)/1000,.05);last=t;while(acc>=1/120){step(1/120);acc-=1/120;}draw();requestAnimationFrame(frame);}reset();resize();requestAnimationFrame(frame);
+
